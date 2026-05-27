@@ -50,19 +50,15 @@ func main() {
 			return
 		}
 
-		// ✅ StreamInfo সহ receive করুন
-		info, err := k8s.StartStream(cfg)
-		if err != nil {
+		if err := k8s.StartStream(cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"message":    "Stream started",
-			"name":       info.Name,
-			"port":       info.Port,
-			"access_url": info.AccessURL, // ✅ client এই URL এ connect করবে
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "Stream started",
+			"name":    cfg.Name,
 		})
 	}))
 

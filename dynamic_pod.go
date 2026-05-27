@@ -21,29 +21,22 @@ type StreamConfig struct {
 	StreamID  string `json:"StreamID"`
 	VideoURLs string `json:"VideoURLs"`
 	Namespace string `json:"Namespace"`
-	OutputURL string `json:"OutputURL"`
-	OutputID  string `json:"OutputID"`
-}
-
-// StartStream এর return value — assigned port সহ
-type StreamInfo struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
-	Port      int32  `json:"port"`       // K8s assigned NodePort
-	AccessURL string `json:"access_url"` // http://NodeIP:Port
+	OutputURL string `json:"OutputURL"` // ← যোগ করো
+	OutputID  string `json:"OutputID"`  // ← যোগ করো
 }
 
 type K8sClient struct {
 	client *kubernetes.Clientset
-	nodeIP string // cluster এর Node IP (একবার set করলেই হয়)
 }
 
 func NewK8sClient() (*K8sClient, error) {
 	var config *rest.Config
 	var err error
 
+	// k3s pod এর ভেতরে থাকলে InClusterConfig
 	config, err = rest.InClusterConfig()
 	if err != nil {
+		// local test এর জন্য fallback
 		kubeconfig := os.Getenv("KUBECONFIG")
 		if kubeconfig == "" {
 			kubeconfig = "/etc/rancher/k3s/k3s.yaml"
@@ -59,47 +52,10 @@ func NewK8sClient() (*K8sClient, error) {
 		return nil, fmt.Errorf("client error: %w", err)
 	}
 
-	k := &K8sClient{client: client}
-
-	// Node IP auto-detect করুন
-	k.nodeIP, err = k.getNodeIP()
-	if err != nil {
-		// fallback: env থেকে নিন
-		k.nodeIP = os.Getenv("NODE_IP")
-		if k.nodeIP == "" {
-			return nil, fmt.Errorf("node IP পাওয়া যায়নি: %w", err)
-		}
-	}
-
-	return k, nil
+	return &K8sClient{client: client}, nil
 }
 
-// Cluster এর যেকোনো Node এর External/Internal IP নিন
-func (k *K8sClient) getNodeIP() (string, error) {
-	nodes, err := k.client.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
-	if err != nil {
-		return "", err
-	}
-	if len(nodes.Items) == 0 {
-		return "", fmt.Errorf("কোনো node নেই")
-	}
-
-	// প্রথম node এর IP নিন (ExternalIP আগে, না থাকলে InternalIP)
-	for _, addr := range nodes.Items[0].Status.Addresses {
-		if addr.Type == corev1.NodeExternalIP {
-			return addr.Address, nil
-		}
-	}
-	for _, addr := range nodes.Items[0].Status.Addresses {
-		if addr.Type == corev1.NodeInternalIP {
-			return addr.Address, nil
-		}
-	}
-
-	return "", fmt.Errorf("node IP পাওয়া যায়নি")
-}
-
-func (k *K8sClient) StartStream(cfg StreamConfig) (*StreamInfo, error) {
+func (k *K8sClient) StartStream(cfg StreamConfig) error {
 	if cfg.Namespace == "" {
 		cfg.Namespace = "default"
 	}
@@ -109,7 +65,7 @@ func (k *K8sClient) StartStream(cfg StreamConfig) (*StreamInfo, error) {
 		context.Background(), cfg.Name, metav1.GetOptions{},
 	)
 	if err == nil {
-		return nil, fmt.Errorf("stream '%s' already running", cfg.Name)
+		return fmt.Errorf("stream '%s' already running", cfg.Name)
 	}
 
 	replicas := int32(1)
@@ -133,8 +89,8 @@ func (k *K8sClient) StartStream(cfg StreamConfig) (*StreamInfo, error) {
 					Labels: map[string]string{"app": cfg.Name},
 				},
 				Spec: corev1.PodSpec{
-					// HostNetwork সরানো হয়েছে ✅
-					// প্রতিটা Pod আলাদা IP পাবে, port conflict নেই
+					HostNetwork:                   true,
+					DNSPolicy:                     corev1.DNSClusterFirstWithHostNet,
 					TerminationGracePeriodSeconds: int64Ptr(0),
 					Containers: []corev1.Container{
 						{
@@ -142,13 +98,25 @@ func (k *K8sClient) StartStream(cfg StreamConfig) (*StreamInfo, error) {
 							Image:           "gostreampro:latest",
 							ImagePullPolicy: corev1.PullNever,
 							Ports: []corev1.ContainerPort{
-								{ContainerPort: 8080}, // সব Pod এ same — কোনো সমস্যা নেই
+								{ContainerPort: 8080},
 							},
 							Env: []corev1.EnvVar{
-								{Name: "STREAM_ID", Value: cfg.StreamID},
-								{Name: "VIDEO_URLS", Value: cfg.VideoURLs},
-								{Name: "DEFAULT_OUTPUT_URL", Value: cfg.OutputURL},
-								{Name: "DEFAULT_OUTPUT_ID", Value: cfg.OutputID},
+								{
+									Name:  "STREAM_ID",
+									Value: cfg.StreamID,
+								},
+								{
+									Name:  "VIDEO_URLS",
+									Value: cfg.VideoURLs,
+								},
+								{
+									Name:  "DEFAULT_OUTPUT_URL",
+									Value: cfg.OutputURL,
+								},
+								{
+									Name:  "DEFAULT_OUTPUT_ID",
+									Value: cfg.OutputID,
+								},
 								{
 									Name: "API_KEY",
 									ValueFrom: &corev1.EnvVarSource{
@@ -202,56 +170,11 @@ func (k *K8sClient) StartStream(cfg StreamConfig) (*StreamInfo, error) {
 		context.Background(), deployment, metav1.CreateOptions{},
 	)
 	if err != nil {
-		return nil, fmt.Errorf("deployment create error: %w", err)
+		return fmt.Errorf("deployment create error: %w", err)
 	}
 
-	// ── NodePort Service create ──
-	svc := &corev1.Service{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cfg.Name + "-svc", // stream-name-svc
-			Namespace: cfg.Namespace,
-			Labels: map[string]string{
-				"app":  cfg.Name,
-				"type": "stream-server",
-			},
-		},
-		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeNodePort,
-			Selector: map[string]string{
-				"app": cfg.Name, // deployment label এর সাথে match
-			},
-			Ports: []corev1.ServicePort{
-				{
-					Port:       8080,
-					TargetPort: k8s_intstr.FromInt(8080),
-					// NodePort দেওয়া হয়নি → K8s 30000-32767 থেকে auto assign করবে ✅
-				},
-			},
-		},
-	}
-
-	createdSvc, err := k.client.CoreV1().Services(cfg.Namespace).Create(
-		context.Background(), svc, metav1.CreateOptions{},
-	)
-	if err != nil {
-		// Service create fail হলে Deployment ও মুছে দিন
-		_ = k.client.AppsV1().Deployments(cfg.Namespace).Delete(
-			context.Background(), cfg.Name, metav1.DeleteOptions{},
-		)
-		return nil, fmt.Errorf("service create error: %w", err)
-	}
-
-	assignedPort := createdSvc.Spec.Ports[0].NodePort
-
-	info := &StreamInfo{
-		Name:      cfg.Name,
-		Namespace: cfg.Namespace,
-		Port:      assignedPort,
-		AccessURL: fmt.Sprintf("http://%s:%d", k.nodeIP, assignedPort),
-	}
-
-	fmt.Printf("✅ Stream '%s' started → %s\n", cfg.Name, info.AccessURL)
-	return info, nil
+	fmt.Printf("✅ Stream '%s' started\n", cfg.Name)
+	return nil
 }
 
 func (k *K8sClient) StopStream(name, namespace string) error {
@@ -259,7 +182,6 @@ func (k *K8sClient) StopStream(name, namespace string) error {
 		namespace = "default"
 	}
 
-	// Deployment delete
 	err := k.client.AppsV1().Deployments(namespace).Delete(
 		context.Background(), name, metav1.DeleteOptions{},
 	)
@@ -268,14 +190,6 @@ func (k *K8sClient) StopStream(name, namespace string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("deployment delete error: %w", err)
-	}
-
-	// Service ও delete ✅
-	err = k.client.CoreV1().Services(namespace).Delete(
-		context.Background(), name+"-svc", metav1.DeleteOptions{},
-	)
-	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("service delete error: %w", err)
 	}
 
 	fmt.Printf("🛑 Stream '%s' stopped\n", name)
@@ -303,22 +217,10 @@ func (k *K8sClient) ListStreams(namespace string) ([]map[string]string, error) {
 		if d.Status.ReadyReplicas == 0 {
 			status = "Pending"
 		}
-
-		// Service থেকে assigned port নিন
-		port := "unknown"
-		svc, err := k.client.CoreV1().Services(namespace).Get(
-			context.Background(), d.Name+"-svc", metav1.GetOptions{},
-		)
-		if err == nil && len(svc.Spec.Ports) > 0 {
-			port = fmt.Sprintf("%d", svc.Spec.Ports[0].NodePort)
-		}
-
 		streams = append(streams, map[string]string{
-			"name":       d.Name,
-			"ready":      fmt.Sprintf("%d/%d", d.Status.ReadyReplicas, d.Status.Replicas),
-			"status":     status,
-			"port":       port,
-			"access_url": fmt.Sprintf("http://%s:%s", k.nodeIP, port),
+			"name":   d.Name,
+			"ready":  fmt.Sprintf("%d/%d", d.Status.ReadyReplicas, d.Status.Replicas),
+			"status": status,
 		})
 	}
 
