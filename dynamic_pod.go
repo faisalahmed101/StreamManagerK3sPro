@@ -139,7 +139,7 @@ func (k *K8sClient) StartStream(cfg StreamConfig) (*StreamInfo, error) {
 					Containers: []corev1.Container{
 						{
 							Name:            cfg.Name,
-							Image:           "gostreampro:latest",
+							Image:           "streamenginegoк3spro:latest",
 							ImagePullPolicy: corev1.PullNever,
 							Ports: []corev1.ContainerPort{
 								{ContainerPort: 8080}, // সব Pod এ same — কোনো সমস্যা নেই
