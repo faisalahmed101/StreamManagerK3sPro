@@ -150,15 +150,8 @@ func (k *K8sClient) StartStream(cfg StreamConfig) (*StreamInfo, error) {
 								{Name: "DEFAULT_OUTPUT_URL", Value: cfg.OutputURL},
 								{Name: "DEFAULT_OUTPUT_ID", Value: cfg.OutputID},
 								{
-									Name: "API_KEY",
-									ValueFrom: &corev1.EnvVarSource{
-										SecretKeyRef: &corev1.SecretKeySelector{
-											LocalObjectReference: corev1.LocalObjectReference{
-												Name: "stream-secret",
-											},
-											Key: "api-key",
-										},
-									},
+									Name:  "API_KEY",
+									Value: os.Getenv("API_KEY"),
 								},
 							},
 							Resources: corev1.ResourceRequirements{
