@@ -23,6 +23,8 @@ spec:
         env:
         - name: MANAGER_API_KEY
           value: "faisal1215"
+        - name: API_KEY
+          value: "faisal1215"
 ---
 apiVersion: v1
 kind: Service
